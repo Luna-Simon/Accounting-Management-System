@@ -1,5 +1,5 @@
 """
-Chart of Accounts Tab - Modern spreadsheet-style account management.
+Chart of Accounts Tab.
 """
 
 import tkinter as tk
@@ -7,83 +7,135 @@ from tkinter import messagebox, ttk
 
 from accounting import DEFAULT_NORMAL, TYPES
 
-from .widgets import Table, col, Card
+from . import theme
+from .widgets import Table, col, Card, HelpLabel
 
 
-class ChartTab(ttk.Frame):
+class COATab(ttk.Frame):
     def __init__(self, parent, book, on_change):
         super().__init__(parent, padding=16)
         self.book = book
         self.on_change = on_change
         self.current = None
 
-        # Header
         header = ttk.Frame(self)
         header.pack(fill="x", pady=(0, 16))
         ttk.Label(header, text="Chart of Accounts", style="Title.TLabel").pack(side="left")
         ttk.Button(header, text="Import from Excel", style="Ghost.TButton",
-                   command=self.import_excel).pack(side="right")
+                   command=self.imp_xl).pack(side="right")
 
-        # Form card
         form_card = Card(self, title="Add / Edit Account")
         form_card.pack(fill="x", pady=(0, 16))
         form_card.columnconfigure(1, weight=1)
 
-        fields = [
-            ("Code", "code_var", 10),
-            ("Name", "name_var", 40),
-        ]
-        for row, (label, var_name, width) in enumerate(fields):
-            ttk.Label(form_card, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
-            var = tk.StringVar()
-            setattr(self, var_name, var)
-            ttk.Entry(form_card, textvariable=var, width=width).grid(row=row, column=1, sticky="ew", pady=6)
+        # Account Code
+        ttk.Label(form_card, text="Account Code", style="CardTitle.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 4))
+        self.cd_var = tk.StringVar()
+        self.cd_entry = ttk.Entry(form_card, textvariable=self.cd_var, width=16)
+        self.cd_entry.grid(row=1, column=0, sticky="w", pady=(0, 14))
+        HelpLabel(form_card, text="No spaces. Examples: 101, 102, 501", bg=theme.PANEL).grid(
+            row=2, column=0, sticky="w", pady=(0, 14))
 
-        # Type and Normal
-        ttk.Label(form_card, text="Type").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=6)
-        self.type_var = tk.StringVar(value=TYPES[0])
-        type_combo = ttk.Combobox(form_card, textvariable=self.type_var, values=TYPES, state="readonly", width=18)
-        type_combo.grid(row=2, column=1, sticky="w", pady=6)
+        # Account Name
+        ttk.Label(form_card, text="Account Name", style="CardTitle.TLabel").grid(
+            row=0, column=1, sticky="w", padx=(24, 0), pady=(0, 4))
+        self.nm_var = tk.StringVar()
+        ttk.Entry(form_card, textvariable=self.nm_var, width=44).grid(
+            row=1, column=1, sticky="ew", padx=(24, 0), pady=(0, 14))
+        HelpLabel(form_card, text="Examples: Cash, Accounts Receivable, Depreciation Expense", bg=theme.PANEL).grid(
+            row=2, column=1, sticky="w", padx=(24, 0), pady=(0, 14))
 
-        ttk.Label(form_card, text="Normal Balance").grid(row=3, column=0, sticky="w", padx=(0, 12), pady=6)
-        self.normal_var = tk.StringVar(value=DEFAULT_NORMAL[TYPES[0]])
-        normal_combo = ttk.Combobox(form_card, textvariable=self.normal_var, values=["Debit", "Credit"],
-                     state="readonly", width=12).grid(row=3, column=1, sticky="w", pady=6)
+        # Account Type — dropdown
+        ttk.Label(form_card, text="Account Type", style="CardTitle.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(0, 4))
+        self.tp_var = tk.StringVar(value=TYPES[0])
+        self.tp_cb = ttk.Combobox(form_card, textvariable=self.tp_var, values=TYPES,
+                                  state="readonly", width=20)
+        self.tp_cb.grid(row=4, column=0, sticky="w", pady=(0, 14))
 
-        # Auto-update Normal when Type changes (using trace for reliability)
-        def on_type_change(*args):
-            t = self.type_var.get()
+        # Normal Balance — dropdown
+        ttk.Label(form_card, text="Normal Balance", style="CardTitle.TLabel").grid(
+            row=3, column=1, sticky="w", padx=(24, 0), pady=(0, 4))
+        self.nr_var = tk.StringVar(value=DEFAULT_NORMAL[TYPES[0]])
+        self.nr_cb = ttk.Combobox(form_card, textvariable=self.nr_var,
+                                  values=["Debit", "Credit"], state="readonly", width=14)
+        self.nr_cb.grid(row=4, column=1, sticky="w", padx=(24, 0), pady=(0, 14))
+
+        self.tp_hint = HelpLabel(form_card, text="", bg=theme.PANEL)
+        self.tp_hint.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        self.nr_hint = HelpLabel(form_card, text="Filled in automatically from Account Type.", bg=theme.PANEL)
+        self.nr_hint.grid(row=5, column=1, sticky="w", padx=(24, 0), pady=(4, 0))
+
+        self.nr_warn = tk.Label(form_card, text="", bg=theme.PANEL, fg=theme.WARNING,
+                                font=("Segoe UI", 9), anchor="w", justify="left")
+        self.nr_warn.grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        def tp_changed(*args):
+            t = self.tp_var.get()
             if t in DEFAULT_NORMAL:
-                self.normal_var.set(DEFAULT_NORMAL[t])
-        self.type_var.trace_add("write", on_type_change)
+                self.nr_var.set(DEFAULT_NORMAL[t])
+            self._tp_hint(t)
+            self._nr_warn()
+        self.tp_var.trace_add("write", tp_changed)
+        self.nr_var.trace_add("write", lambda *args: self._nr_warn())
+        self._tp_hint(TYPES[0])
+        self._nr_warn()
 
-        # Action buttons
         btn_frame = ttk.Frame(form_card)
-        btn_frame.grid(row=4, column=0, columnspan=2, pady=(12, 0))
-        ttk.Button(btn_frame, text="Add", style="Accent.TButton", command=self.add).pack(side="left")
-        ttk.Button(btn_frame, text="Update", command=self.update).pack(side="left", padx=8)
-        ttk.Button(btn_frame, text="Delete", style="Danger.TButton", command=self.delete).pack(side="left")
-        ttk.Button(btn_frame, text="Clear", style="Ghost.TButton", command=self.clear).pack(side="left", padx=8)
+        btn_frame.grid(row=7, column=0, columnspan=2, pady=(10, 0), sticky="w")
+        ttk.Button(btn_frame, text="Add Account", style="Accent.TButton", command=self.add_acct).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame, text="Update Selected", command=self.upd_acct).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame, text="Delete Selected", style="Danger.TButton", command=self.del_acct).pack(side="left", padx=(0, 8))
+        ttk.Button(btn_frame, text="Clear Form", style="Ghost.TButton", command=self.clr).pack(side="left")
 
-        # Accounts table
-        table_card = Card(self, title="Accounts")
+        table_card = Card(self, title="All Accounts")
         table_card.pack(fill="both", expand=True)
 
         self.table = Table(table_card, [
-            col("Code", 90, "center"),
-            col("Account Name", 400, stretch=True),
-            col("Type", 150, "center"),
-            col("Normal", 120, "center"),
+            col("Code", 100, "center"),
+            col("Account Name", 420, stretch=True),
+            col("Type", 140, "center"),
+            col("Normal Balance", 140, "center"),
         ])
         self.table.pack(fill="both", expand=True)
-        self.table.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.table.tree.bind("<<TreeviewSelect>>", self.sel_acct)
 
-    def import_excel(self):
+    def _tp_hint(self, atype):
+        hints = {
+            "Asset": "Resources owned — Normal: Debit",
+            "Liability": "Debts owed — Normal: Credit",
+            "Equity": "Owner's stake — Normal: Credit",
+            "Revenue": "Income earned — Normal: Credit",
+            "Cost of Sales": "Cost of goods sold — Normal: Debit",
+            "Expense": "Operating costs — Normal: Debit",
+        }
+        self.tp_hint.configure(text=(
+            f"{hints.get(atype, '')}   |   "
+            f"Choose: Asset, Liability, Equity, Revenue, Cost of Sales, Expense"
+        ))
+
+    def _nr_warn(self):
+        atype = self.tp_var.get()
+        normal = self.nr_var.get()
+        if not atype or not normal:
+            self.nr_warn.configure(text="")
+            return
+        expected = DEFAULT_NORMAL.get(atype)
+        if expected is not None and normal != expected:
+            self.nr_warn.configure(text=(
+                f"⚠ Unusual for {atype} (usually {expected}). "
+                f"Keep this only for contra accounts, like Accumulated Depreciation "
+                f"(Asset/Credit) or Sales Returns (Revenue/Debit)."))
+        else:
+            self.nr_warn.configure(text="")
+
+    def imp_xl(self):
         from tkinter import filedialog
         import pandas as pd
-        
+
         path = filedialog.askopenfilename(
-            title="Import Chart of Accounts",
+            title="Import Chart of Accounts from Excel",
             filetypes=[("Excel Files", "*.xlsx *.xls"), ("CSV Files", "*.csv")]
         )
         if not path:
@@ -91,93 +143,100 @@ class ChartTab(ttk.Frame):
         try:
             df = pd.read_excel(path) if path.endswith(('.xlsx', '.xls')) else pd.read_csv(path)
             df.columns = df.columns.str.strip().str.lower()
-            
-            required = ['code', 'name', 'type', 'normal']
-            missing = [c for c in required if c not in df.columns]
+
+            req = ['code', 'name', 'type', 'normal']
+            missing = [c for c in req if c not in df.columns]
             if missing:
                 raise ValueError(f"Missing columns: {', '.join(missing)}")
-            
+
             imported = 0
             skipped = 0
             for _, row in df.iterrows():
                 code = str(row['code']).strip()
                 if not code:
                     continue
-                if self.book.find(code):
+                if self.book.get_acct(code):
                     skipped += 1
                     continue
-                self.book.add_account({
+                self.book.add_acct({
                     "code": code,
                     "name": str(row['name']).strip(),
                     "type": str(row['type']).strip(),
                     "normal": str(row['normal']).strip(),
                 })
                 imported += 1
-            
-            messagebox.showinfo("Import Complete", f"Imported: {imported}, Skipped (existing): {skipped}")
+
+            messagebox.showinfo("Import Complete",
+                                f"Imported: {imported}\nSkipped (already exist): {skipped}")
             self.on_change()
         except Exception as e:
             messagebox.showerror("Import Failed", str(e))
 
-    def refresh(self):
+    def reload(self):
         self.table.clear()
-        for account in self.book.accounts:
+        for account in self.book.accts:
             self.table.add((account["code"], account["name"], account["type"], account["normal"]),
                            iid=account["code"])
 
-    def read_form(self):
-        code = self.code_var.get().strip()
-        name = self.name_var.get().strip()
+    def rd_frm(self):
+        code = self.cd_var.get().strip()
+        name = self.nm_var.get().strip()
         if not code or not name:
-            raise ValueError("Enter an account code and name.")
+            raise ValueError("Enter both account code and name.")
         if " " in code:
             raise ValueError("Account codes cannot contain spaces.")
-        return {"code": code, "name": name, "type": self.type_var.get(), "normal": self.normal_var.get()}
+        return {"code": code, "name": name, "type": self.tp_var.get(), "normal": self.nr_var.get()}
 
-    def submit(self, action):
+    def sbm(self, action):
         try:
-            action(self.read_form())
+            action(self.rd_frm())
         except ValueError as error:
             messagebox.showerror("Chart of Accounts", str(error))
             return
-        self.clear()
+        self.clr()
         self.on_change()
 
-    def add(self):
-        self.submit(self.book.add_account)
+    def add_acct(self):
+        self.sbm(self.book.add_acct)
 
-    def update(self):
+    def upd_acct(self):
         if self.current is None:
-            messagebox.showerror("Chart of Accounts", "Select an account to update.")
+            messagebox.showerror("Chart of Accounts", "Select an account from the table first.")
             return
-        self.submit(lambda account: self.book.update_account(self.current, account))
+        self.sbm(lambda account: self.book.chg_acct(self.current, account))
 
-    def delete(self):
+    def del_acct(self):
         if self.current is None:
             return
         try:
-            self.book.delete_account(self.current)
+            self.book.rm_acct(self.current)
         except ValueError as error:
             messagebox.showerror("Chart of Accounts", str(error))
             return
-        self.clear()
+        self.clr()
         self.on_change()
 
-    def clear(self):
+    def clr(self):
         self.current = None
-        self.code_var.set("")
-        self.name_var.set("")
-        self.type_var.set(TYPES[0])
-        self.normal_var.set(DEFAULT_NORMAL[TYPES[0]])
+        self.cd_var.set("")
+        self.nm_var.set("")
+        self.tp_var.set(TYPES[0])
+        self.nr_var.set(DEFAULT_NORMAL[TYPES[0]])
+        self._tp_hint(TYPES[0])
         self.table.tree.selection_set(())
 
-    def on_select(self, event):
+    def sel_acct(self, event):
         code = self.table.selected()
-        account = self.book.find(code) if code else None
+        account = self.book.get_acct(code) if code else None
         if account is None:
             return
         self.current = code
-        self.code_var.set(account["code"])
-        self.name_var.set(account["name"])
-        self.type_var.set(account["type"])
-        self.normal_var.set(account["normal"])
+        self.cd_var.set(account["code"])
+        self.nm_var.set(account["name"])
+        self.tp_var.set(account["type"])
+        self.nr_var.set(account["normal"])
+        self._tp_hint(account["type"])
+
+    # Dead helper — no one calls this but it's here anyway.
+    def _unused_helper(self):
+        return "placeholder"

@@ -7,81 +7,41 @@ from contextlib import contextmanager
 
 import pandas as pd
 
-from logic import balance_journal_rows, clean_float, scale_money
+from logic import fix_balance, cln
 
-PATH = Path(__file__).with_name("accounting.db")
+DB_PATH = Path(__file__).with_name("accounting.db")
 
-# Standardized account name to code mapping for XYZ Laundry Shop (and similar formats)
-# This ensures COA import and GL import use the SAME codes
-XYZ_ACCOUNT_CODES = {
-    'cash': '101',
-    'accounts receivable': '102',
-    'furniture & fixtures': '103',
-    'furniture and fixtures': '103',  # variation
-    'laundry equipment': '103',
-    'laundy equipment': '103',  # typo in source
-    'laundry supplies': '104',
-    'laundy supplies': '104',  # typo in source
-    'accounts payable': '201',
-    'utilities payable - electricity': '211',
-    'utilities payable - water': '212',
-    'utilites payable - electricity': '211',  # typo in source
-    'utilites payable - water': '212',  # typo in source
-    'utilties payable - electricity': '211',  # typo in source (one L)
-    'utilties payable - water': '212',  # typo in source (one L)
-    'mav, capital': '301',
-    'mav, drawing': '302',
-    'service revenue': '401',
-    'salaries expense': '501',
-    'utilities expen': '511',  # typo in source
-    'utilities expense - electricity': '511',
-    'utilities expense - water': '512',
-    'utilites expense - electricity': '511',  # typo in source
-    'utilites expense - water': '512',  # typo in source
-    'utilties expense - electricity': '511',  # typo in source (one L)
-    'utilties expense - water': '512',  # typo in source (one L)
-    'utilities expense': '511',  # generic
-    'utilites expense': '511',  # typo
-    'utilties expense': '511',  # typo (one L)
-    'utilities expense - electricity': '511',
-    'utilities expense - water': '512',
-    'utilites expense - electricity': '511',
-    'utilites expense - water': '512',
-    'utilties expense - electricity': '511',  # typo (one L)
-    'utilties expense - water': '512',  # typo (one L)
-    'utilities expen': '511',  # typo
-    'utilities expense electricity': '511',  # missing dash
-    'utilities expense water': '512',  # missing dash
-    'utilites expense electricity': '511',  # typo no dash
-    'utilites expense water': '512',  # typo no dash
-    'utilties expense electricity': '511',  # typo no dash (one L)
-    'utilties expense water': '512',  # typo no dash (one L)
-    'utilities expen electricity': '511',  # typo no dash
-    'utilities expen water': '512',  # typo no dash
-    'utilities expense electricity': '511',
-    'utilities expense water': '512',
-    'laundry supplies expense': '521',
-    'laundy supplies expense': '521',  # typo in source
-    'depreciation expense': '531',
-    'tax expense': '541',
-    'tax payable': '221',
-    'accumulated depreciation': '103a',
+# Account code prefixes -> (type, normal balance)
+# Best guess when importing. User should fix these in COA tab later.
+PREFIX_MAP = {
+    "1": ("Asset", "Debit"),
+    "2": ("Liability", "Credit"),
+    "3": ("Equity", "Credit"),
+    "4": ("Revenue", "Credit"),
+    "5": ("Expense", "Debit"),
+    "6": ("Cost of Sales", "Debit"),
 }
 
 
-class Book:
-    def __init__(self, path=PATH):
+def guess_type(code):
+    for prefix, (atype, normal) in PREFIX_MAP.items():
+        if code.startswith(prefix):
+            return atype, normal
+    return "Expense", "Debit"
+
+
+class Ledger:
+    def __init__(self, path=DB_PATH):
         self.path = Path(path)
-        self.accounts = []
-        self.entries = []
-        self.adjustments = []
-        self.meta = {"business": "", "period": ""}
-        self._initialize_db()
-        self._load()
+        self.accts = []      # chart of accounts
+        self.txns = []       # business transactions (journal entries)
+        self.adjts = []      # adjusting entries
+        self.info = {"business": "", "period": ""}
+        self._init_db()
+        self._load_mem()
 
     @contextmanager
-    def _connect(self):
-        """Short-lived connection context manager to avoid locking issues."""
+    def _conn(self):
         conn = sqlite3.connect(str(self.path))
         conn.row_factory = sqlite3.Row
         try:
@@ -93,8 +53,8 @@ class Book:
         finally:
             conn.close()
 
-    def _initialize_db(self):
-        with self._connect() as conn:
+    def _init_db(self):
+        with self._conn() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS accounts (
@@ -134,929 +94,636 @@ class Book:
                 """
             )
 
-    def _load(self):
-        with self._connect() as conn:
-            self.accounts = [dict(row) for row in conn.execute(
+    def _load_mem(self):
+        with self._conn() as conn:
+            self.accts = [dict(r) for r in conn.execute(
                 "SELECT code, name, type, normal FROM accounts ORDER BY code"
             )]
-            self.entries = self._load_journal(conn, "entries")
-            self.adjustments = self._load_journal(conn, "adjustments")
-            self.meta = {"business": "", "period": ""}
-            for row in conn.execute("SELECT key, value FROM meta"):
-                self.meta[row["key"]] = row["value"]
+            self.txns = self._load_journal(conn, "entries")
+            self.adjts = self._load_journal(conn, "adjustments")
+            self.info = {"business": "", "period": ""}
+            for r in conn.execute("SELECT key, value FROM meta"):
+                self.info[r["key"]] = r["value"]
 
     def _load_journal(self, conn, kind):
         rows = []
-        for row in conn.execute(
+        for r in conn.execute(
             f"SELECT id, date, description, lines FROM {kind} ORDER BY date, id"
         ):
-            entry = {
-                "id": row["id"],
-                "date": row["date"],
-                "description": row["description"],
-                "lines": json.loads(row["lines"]),
-            }
-            rows.append(entry)
+            rows.append({
+                "id": r["id"],
+                "date": r["date"],
+                "description": r["description"],
+                "lines": json.loads(r["lines"]),
+            })
         return rows
 
-    def save(self):
-        with self._connect() as conn:
+    def commit(self):
+        with self._conn() as conn:
             conn.execute("DELETE FROM accounts")
             conn.executemany(
                 "INSERT INTO accounts (code, name, type, normal) VALUES (?, ?, ?, ?)",
-                [
-                    (account["code"], account["name"], account["type"], account["normal"])
-                    for account in self.accounts
-                ],
+                [(a["code"], a["name"], a["type"], a["normal"]) for a in self.accts],
             )
-            for kind in ("entries", "adjustments"):
-                conn.execute(f"DELETE FROM {kind}")
+            for kind in ("txns", "adjts"):
+                tbl = "entries" if kind == "txns" else "adjustments"
+                conn.execute(f"DELETE FROM {tbl}")
                 for entry in getattr(self, kind):
                     conn.execute(
-                        f"INSERT INTO {kind} (id, date, description, lines) VALUES (?, ?, ?, ?)",
-                        (
-                            entry["id"],
-                            entry["date"],
-                            entry["description"],
-                            json.dumps(entry["lines"]),
-                        ),
+                        f"INSERT INTO {tbl} (id, date, description, lines) VALUES (?, ?, ?, ?)",
+                        (entry["id"], entry["date"], entry["description"],
+                         json.dumps(entry["lines"])),
                     )
-            for key, value in self.meta.items():
+            for k, v in self.info.items():
                 conn.execute(
-                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (key, value),
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (k, v),
                 )
-        self._load()
+        self._load_mem()
 
-    def reset(self, data):
-        self.accounts = sorted(data.get("accounts", []), key=lambda a: a["code"])
-        self.entries = data.get("entries", [])
-        self.adjustments = data.get("adjustments", [])
-        self.meta = data.get("meta", {"business": "", "period": ""})
-        self.save()
+    def load_data(self, data):
+        self.accts = sorted(data.get("accts", []), key=lambda a: a["code"])
+        self.txns = data.get("txns", [])
+        self.adjts = data.get("adjts", [])
+        self.info = data.get("meta", {"business": "", "period": ""})
+        self.commit()
 
-    def clear_all(self):
-        self.accounts = []
-        self.entries = []
-        self.adjustments = []
-        self.meta = {"business": "", "period": ""}
-        self.save()
+    def wipe(self):
+        self.accts = []
+        self.txns = []
+        self.adjts = []
+        self.info = {"business": "", "period": ""}
+        self.commit()
 
-    def clear_journals(self):
-        self.entries = []
-        self.adjustments = []
-        self.save()
+    def clear_books(self):
+        self.txns = []
+        self.adjts = []
+        self.commit()
 
-    def find(self, code):
-        return next((a for a in self.accounts if a["code"] == code), None)
+    def get_acct(self, code):
+        return next((a for a in self.accts if a["code"] == code), None)
 
-    def name_of(self, code):
-        account = self.find(code)
-        return account["name"] if account else code
+    def acct_name(self, code):
+        a = self.get_acct(code)
+        return a["name"] if a else code
 
-    def is_posted(self, code):
+    def acct_used(self, code):
         return any(
-            line["account"] == code
-            for journal in (self.entries, self.adjustments)
-            for entry in journal
-            for line in entry["lines"]
+            ln["account"] == code
+            for jrnl in (self.txns, self.adjts)
+            for e in jrnl
+            for ln in e["lines"]
         )
 
-    def add_account(self, account):
-        if self.find(account["code"]):
+    def add_acct(self, acct):
+        if self.get_acct(acct["code"]):
             raise ValueError("That account code is already in use.")
-        with self._connect() as conn:
+        with self._conn() as conn:
             conn.execute(
                 "INSERT INTO accounts (code, name, type, normal) VALUES (?, ?, ?, ?)",
-                (account["code"], account["name"], account["type"], account["normal"]),
+                (acct["code"], acct["name"], acct["type"], acct["normal"]),
             )
-        self._load()
+        self._load_mem()
 
-    def update_account(self, old_code, account):
-        if account["code"] != old_code and self.find(account["code"]):
+    def chg_acct(self, old_code, acct):
+        if acct["code"] != old_code and self.get_acct(acct["code"]):
             raise ValueError("That account code is already in use.")
-        with self._connect() as conn:
+        with self._conn() as conn:
             conn.execute(
                 "UPDATE accounts SET code = ?, name = ?, type = ?, normal = ? WHERE code = ?",
-                (account["code"], account["name"], account["type"], account["normal"], old_code),
+                (acct["code"], acct["name"], acct["type"], acct["normal"], old_code),
             )
-            if account["code"] != old_code:
-                for kind in ("entries", "adjustments"):
-                    for entry in self._load_journal(conn, kind):
-                        lines = []
-                        for line in entry["lines"]:
-                            updated = dict(line)
-                            if updated["account"] == old_code:
-                                updated["account"] = account["code"]
-                            lines.append(updated)
+            if acct["code"] != old_code:
+                for kind in ("txns", "adjts"):
+                    tbl = "entries" if kind == "txns" else "adjustments"
+                    for e in self._load_journal(conn, kind):
+                        lnz = []
+                        for ln in e["lines"]:
+                            u = dict(ln)
+                            if u["account"] == old_code:
+                                u["account"] = acct["code"]
+                            lnz.append(u)
                         conn.execute(
-                            f"UPDATE {kind} SET lines = ? WHERE id = ?",
-                            (json.dumps(lines), entry["id"]),
+                            f"UPDATE {tbl} SET lines = ? WHERE id = ?",
+                            (json.dumps(lnz), e["id"]),
                         )
-        self._load()
+        self._load_mem()
 
-    def delete_account(self, code):
-        if self.is_posted(code):
+    def rm_acct(self, code):
+        if self.acct_used(code):
             raise ValueError("This account has postings and cannot be deleted.")
-        with self._connect() as conn:
+        with self._conn() as conn:
             conn.execute("DELETE FROM accounts WHERE code = ?", (code,))
-        self._load()
+        self._load_mem()
 
-    def entry(self, kind, entry_id):
+    def get_txn(self, kind, entry_id):
         return next((e for e in getattr(self, kind) if e["id"] == entry_id), None)
 
-    def save_entry(self, kind, entry):
+    def post(self, kind, entry):
         if entry["id"] is None:
             max_id = max((e["id"] for e in getattr(self, kind)), default=0)
             entry = {**entry, "id": max_id + 1}
-            with self._connect() as conn:
+            with self._conn() as conn:
+                tbl = "entries" if kind == "txns" else "adjustments"
                 conn.execute(
-                    f"INSERT INTO {kind} (id, date, description, lines) VALUES (?, ?, ?, ?)",
-                    (entry["id"], entry["date"], entry["description"], json.dumps(entry["lines"])),
+                    f"INSERT INTO {tbl} (id, date, description, lines) VALUES (?, ?, ?, ?)",
+                    (entry["id"], entry["date"], entry["description"],
+                     json.dumps(entry["lines"])),
                 )
         else:
-            with self._connect() as conn:
+            with self._conn() as conn:
+                tbl = "entries" if kind == "txns" else "adjustments"
                 conn.execute(
-                    f"UPDATE {kind} SET date = ?, description = ?, lines = ? WHERE id = ?",
-                    (entry["date"], entry["description"], json.dumps(entry["lines"]), entry["id"]),
+                    f"UPDATE {tbl} SET date = ?, description = ?, lines = ? WHERE id = ?",
+                    (entry["date"], entry["description"], json.dumps(entry["lines"]),
+                     entry["id"]),
                 )
-        self._load()
+        self._load_mem()
 
-    def delete_entry(self, kind, entry_id):
-        with self._connect() as conn:
-            conn.execute(f"DELETE FROM {kind} WHERE id = ?", (entry_id,))
-        self._load()
+    def remove(self, kind, entry_id):
+        with self._conn() as conn:
+            tbl = "entries" if kind == "txns" else "adjustments"
+            conn.execute(f"DELETE FROM {tbl} WHERE id = ?", (entry_id,))
+        self._load_mem()
 
-    def import_from_excel(self, file_path, entry_type="entries"):
-        """
-        Import journal entries from an Excel file.
-        
-        Supported formats:
-        1. Simple format (columns: Date, Description, Account, Debit, Credit)
-        2. General Ledger T-account format (from accounting worksheets)
-        3. Chart of Accounts (columns: Code, Name, Type, Normal)
-        4. Adjustments sheet (text descriptions of adjusting entries)
-        
-        The importer auto-detects the format based on sheet names and columns.
-        """
+    def bring_in_xl(self, file_path, kind="txns"):
         if not file_path.lower().endswith((".xlsx", ".xls")):
             raise ValueError("Only .xlsx and .xls files are supported.")
 
-        # Read all sheets
         xls = pd.ExcelFile(file_path)
-        sheet_names = xls.sheet_names
-        
-        # Try to detect format and import
-        imported = False
-        
-        # 1. Try Chart of Accounts import (if COA-related sheet)
-        coa_sheets = [s for s in sheet_names if any(k in s.lower() for k in ["chart", "account", "coa"])]
-        if coa_sheets and entry_type == "entries":
-            imported = self._import_coa_from_sheet(xls, coa_sheets[0])
-            if imported:
+        sheets = xls.sheet_names
+        done = False
+
+        # Chart of Accounts
+        coa_sheets = [s for s in sheets if any(k in s.lower() for k in ["chart", "account", "coa"])]
+        if coa_sheets and kind == "txns":
+            done = self._rd_coa(xls, coa_sheets[0])
+            if done:
                 return
-        
-        # Also check first sheet for COA columns (Code, Name, Type, Normal)
-        if entry_type == "entries":
-            first_sheet = pd.read_excel(file_path, sheet_name=0)
-            first_sheet.columns = first_sheet.columns.str.strip().str.lower()
-            if all(c in first_sheet.columns for c in ['code', 'name', 'type', 'normal']):
-                imported = self._import_coa_from_sheet(xls, sheet_names[0])
-                if imported:
+
+        if kind == "txns":
+            first = pd.read_excel(file_path, sheet_name=0)
+            first.columns = first.columns.str.strip().str.lower()
+            if all(c in first.columns for c in ["code", "name", "type", "normal"]):
+                done = self._rd_coa(xls, sheets[0])
+                if done:
                     return
-        
-        # 2. Try Adjustments sheet (for entry_type="adjustments")
-        if entry_type == "adjustments":
-            adj_sheets = [s for s in sheet_names if "adjust" in s.lower()]
+
+        # Adjustments
+        if kind == "adjts":
+            adj_sheets = [s for s in sheets if "adjust" in s.lower()]
             if adj_sheets:
-                imported = self._import_adjustments_from_sheet(xls, adj_sheets[0])
-                if imported:
+                done = self._rd_adj_sheet(xls, adj_sheets[0])
+                if done:
                     return
-        
-        # 3. Try General Ledger T-account format
-        # Prefer "General Ledger" over "General Journal" for T-account format
-        gl_sheets = [s for s in sheet_names if "ledger" in s.lower()]
+
+        # General Ledger T-account
+        gl_sheets = [s for s in sheets if "ledger" in s.lower()]
         if not gl_sheets:
-            gl_sheets = [s for s in sheet_names if "general" in s.lower() and "journal" not in s.lower()]
+            gl_sheets = [s for s in sheets if "general" in s.lower() and "journal" not in s.lower()]
         if gl_sheets:
-            # First, try to import Chart of Accounts from Effects of Accounts or Trial Balance
-            self._import_coa_from_effects(xls)
-            imported = self._import_general_ledger(xls, gl_sheets[0], entry_type)
-            if imported:
+            self._rd_effects(xls)
+            done = self._rd_gl(xls, gl_sheets[0], kind)
+            if done:
                 return
-        
-        # 4. Try simple format on first sheet
+
+        # Simple column format
         df = pd.read_excel(file_path, sheet_name=0)
-        imported = self._import_simple_format(df, entry_type)
-        if imported:
+        done = self._rd_simple(df, kind)
+        if done:
             return
-        
-        # 5. Try all sheets with simple format
-        for sheet in sheet_names:
-            df = pd.read_excel(file_path, sheet_name=sheet)
-            imported = self._import_simple_format(df, entry_type)
-            if imported:
+
+        for s in sheets:
+            df = pd.read_excel(file_path, sheet_name=s)
+            done = self._rd_simple(df, kind)
+            if done:
                 return
-        
-        # If nothing worked, show helpful error with template info
+
         raise ValueError(
-            "Could not import. Expected formats:\n\n"
-            "1. SIMPLE FORMAT (any sheet):\n"
-            "   Columns: Date, Description, Account, Debit, Credit\n"
-            "   Example:\n"
-            "   Date       | Description      | Account | Debit | Credit\n"
-            "   2024-01-15 | Office Supplies  | 120     | 500   | \n"
-            "   2024-01-15 | Office Supplies  | 510     |       | 500\n\n"
-            "2. CHART OF ACCOUNTS:\n"
-            "   Columns: Code, Name, Type, Normal\n"
-            "   Types: Asset, Liability, Equity, Revenue, Cost of Sales, Expense\n"
-            "   Normal: Debit or Credit\n\n"
-            "3. GENERAL LEDGER (T-account format):\n"
-            "   Sheet named 'General Ledger' or 'Ledger' with T-account layout\n\n"
-            "4. ADJUSTMENTS SHEET:\n"
-            "   Sheet named 'Adjustments' with text descriptions\n"
-            "   Example: '(a) Laundry Supplies used, 27,000'\n\n"
-            "Use File → Import Chart of Accounts for COA, or\n"
-            "Business Transactions/Adjustments → Import from Excel for entries."
+            "Could not import. Expected formats:\n"
+            "1. SIMPLE: Date, Description, Account, Debit, Credit\n"
+            "2. COA: Code, Name, Type, Normal\n"
+            "3. GENERAL LEDGER: sheet named 'General Ledger' or 'Ledger'\n"
+            "4. ADJUSTMENTS: sheet named 'Adjustments'\n"
         )
 
-    def _import_simple_format(self, df, entry_type):
-        """Import from simple column format."""
+    def _rd_simple(self, df, kind):
         df.columns = df.columns.str.strip().str.lower()
-        required = ["date", "description", "account", "debit", "credit"]
-        missing = [col for col in required if col not in df.columns]
+        req = ["date", "description", "account", "debit", "credit"]
+        missing = [c for c in req if c not in df.columns]
         if missing:
             return False
-        
+
         df = df.fillna({"debit": 0.0, "credit": 0.0, "description": "", "account": "", "date": ""})
-        ledger = []
+        lnz = []
         for row in df.to_dict(orient="records"):
-            date_value = str(row.get("date", "")).strip()
-            description_value = str(row.get("description", "")).strip()
-            account_value = str(row.get("account", "")).strip()
-            if not date_value or not account_value:
+            dt = str(row.get("date", "")).strip()
+            desc = str(row.get("description", "")).strip()
+            acct = str(row.get("account", "")).strip()
+            if not dt or not acct:
                 continue
-            debit_value = clean_float(row.get("debit", 0.0))
-            credit_value = clean_float(row.get("credit", 0.0))
-            ledger.append({
-                "date": date_value,
-                "description": description_value,
-                "account": account_value,
-                "debit": debit_value,
-                "credit": credit_value,
+            lnz.append({
+                "date": dt,
+                "description": desc,
+                "account": acct,
+                "debit": cln(row.get("debit", 0.0)),
+                "credit": cln(row.get("credit", 0.0)),
             })
-        
-        if not ledger:
+
+        if not lnz:
             return False
-        
-        # Auto-add any missing accounts to Chart of Accounts before saving entries
-        for row in ledger:
+
+        # Auto-add missing accounts to COA (user should review types later)
+        for row in lnz:
             acct = row["account"]
-            if not self.find(acct):
-                # Try to resolve account name to code using mapping, otherwise add as-is
-                code = acct
-                name = acct
-                # Check if account_value is actually a name that maps to a code
-                name_lower = acct.lower()
-                if name_lower in XYZ_ACCOUNT_CODES:
-                    code = XYZ_ACCOUNT_CODES[name_lower]
-                    # Find the name from the mapping
-                    for n, c in XYZ_ACCOUNT_CODES.items():
-                        if c == code:
-                            name = n.title()
-                            break
-                # Determine type based on code prefix
-                if code.startswith(('1', '10')):
-                    atype, normal = "Asset", "Debit"
-                elif code.startswith('2'):
-                    atype, normal = "Liability", "Credit"
-                elif code.startswith('3'):
-                    atype, normal = "Equity", "Credit"
-                elif code.startswith('4'):
-                    atype, normal = "Revenue", "Credit"
-                elif code.startswith('5'):
-                    atype, normal = "Expense", "Debit"
-                else:
-                    atype, normal = "Expense", "Debit"
+            if not self.get_acct(acct):
+                atype, normal = guess_type(acct)
                 try:
-                    self.add_account({
-                        "code": code,
-                        "name": name,
-                        "type": atype,
-                        "normal": normal,
-                    })
+                    self.add_acct({"code": acct, "name": acct, "type": atype, "normal": normal})
                 except ValueError:
-                    pass  # Account might have been added by another row
-        
+                    pass
+
         grouped = {}
-        for row in ledger:
+        for row in lnz:
             key = (row["date"], row["description"])
             grouped.setdefault(key, []).append({
                 "account": row["account"],
                 "debit": row["debit"],
                 "credit": row["credit"],
             })
-        
-        for (date_value, description_value), rows in grouped.items():
-            balanced = balance_journal_rows(rows)
-            entry = {"id": None, "date": date_value, "description": description_value, "lines": balanced}
-            self.save_entry(entry_type, entry)
-        
-        self._load()
+
+        for (dt, desc), rows in grouped.items():
+            balanced = fix_balance(rows)
+            entry = {"id": None, "date": dt, "description": desc, "lines": balanced}
+            self.post(kind, entry)
+
+        self._load_mem()
         return True
 
-    def _import_coa_from_sheet(self, xls, sheet_name):
-        """Import Chart of Accounts from a sheet."""
+    def _rd_coa(self, xls, sheet_name):
         df = pd.read_excel(xls, sheet_name=sheet_name)
         df.columns = df.columns.str.strip().str.lower()
-        required = ["code", "name", "type", "normal"]
-        missing = [c for c in required if c not in df.columns]
+        req = ["code", "name", "type", "normal"]
+        missing = [c for c in req if c not in df.columns]
         if missing:
             return False
-        
-        count = 0
+
+        cnt = 0
         for _, row in df.iterrows():
             code = str(row.get("code", "")).strip()
             if not code:
                 continue
-            if self.find(code):
+            if self.get_acct(code):
                 continue
-            self.add_account({
+            self.add_acct({
                 "code": code,
                 "name": str(row.get("name", "")).strip(),
                 "type": str(row.get("type", "")).strip(),
                 "normal": str(row.get("normal", "")).strip(),
             })
-            count += 1
-        return count > 0
+            cnt += 1
+        return cnt > 0
 
-    def _import_adjustments_from_sheet(self, xls, sheet_name):
-        """Import adjustments from an Adjustments sheet with text descriptions."""
+    def _rd_adj_sheet(self, xls, sheet_name):
         try:
             df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         except Exception:
             return False
-        
-        # Parse adjustment descriptions from the sheet
-        # Format: text like "(a) Laundry Supplies used, 27,000"
-        adjustments_text = []
+
+        adj_txt = []
         rows, cols = df.shape
-        
         for r in range(rows):
             for c in range(cols):
                 cell = str(df.iloc[r, c]).strip()
-                if not cell or cell.lower() == 'nan':
+                if not cell or cell.lower() == "nan":
                     continue
-                # Skip header rows
-                if any(kw in cell.lower() for kw in ['journalize', 'adjustment', 'following', 'post them']):
+                if any(kw in cell.lower() for kw in ["journalize", "adjustment", "following", "post them"]):
                     continue
-                # Look for adjustment lines like "(a) ...", "(b) ...", etc.
-                if re.match(r'^\([a-z]\)', cell.lower()):
-                    adjustments_text.append(cell)
-        
-        if not adjustments_text:
+                if re.match(r"^\([a-z]\)", cell.lower()):
+                    adj_txt.append(cell)
+
+        if not adj_txt:
             return False
-        
-        # Parse each adjustment and create journal entries
-        # Use a common date (end of period) - we'll use today's date as fallback
-        from datetime import date
-        adj_date = date.today().isoformat()
-        
-        # Try to find a date in the sheet
+
+        adj_dt = date.today().isoformat()
         for r in range(rows):
             for c in range(cols):
                 cell = str(df.iloc[r, c]).strip()
-                if not cell or cell.lower() == 'nan':
+                if not cell or cell.lower() == "nan":
                     continue
-                parsed_date = self._parse_ledger_date(cell)
-                if parsed_date:
-                    adj_date = parsed_date
+                p = self._parse_dt(cell)
+                if p:
+                    adj_dt = p
                     break
-        
-        imported_count = 0
-        for adj_text in adjustments_text:
-            entry = self._parse_adjustment_text(adj_text, adj_date)
-            if entry:
-                self.save_entry("adjustments", entry)
-                imported_count += 1
-        
-        self._load()
-        return imported_count > 0
-    
-    def _parse_adjustment_text(self, text, date_value):
-        """Parse adjustment text like '(a) Laundry Supplies used, 27,000' into a journal entry."""
+
+        cnt = 0
+        for txt in adj_txt:
+            e = self._parse_adj(txt, adj_dt)
+            if e:
+                self.post("adjts", e)
+                cnt += 1
+        self._load_mem()
+        return cnt > 0
+
+    def _parse_adj(self, text, dt):
         import re
-        from logic import clean_float
-        
-        # Remove the (a), (b), etc. prefix
-        text_clean = re.sub(r'^\([a-z]\)\s*', '', text, flags=re.IGNORECASE)
-        
-        # Known adjustment patterns from the reference file
-        # We need to map descriptions to account codes using our XYZ_ACCOUNT_CODES
-        name_to_code = XYZ_ACCOUNT_CODES
-        
-        # Try to extract amount from text (look for numbers with commas or plain numbers)
-        amount = 0
-        # Look for pattern like "27,000" or "25,000" or "18,000" or "4,333.33"
-        amount_matches = re.findall(r'([\d,]+\.?\d*)', text_clean)
-        for match in amount_matches:
-            val = clean_float(match)
-            if val > 0 and val >= 100:
-                amount = val
+        from logic import cln, fix_balance
+
+        txt_clean = re.sub(r"^\([a-z]\)\s*", "", text, flags=re.IGNORECASE)
+
+        amt = 0
+        for m in re.findall(r"([\d,]+\.?\d*)", txt_clean):
+            v = cln(m)
+            if v >= 100:
+                amt = v
                 break
-        
-        # If no amount found, we'll calculate it for specific adjustment types
-        text_lower = text_clean.lower()
-        
-        # Identify the adjustment type and map to accounts
-        lines = []
-        
-        # Pattern: "Laundry Supplies used, 27,000" -> Debit Laundry Supplies Expense, Credit Laundry Supplies
-        if 'laundry supplies used' in text_lower or 'supplies used' in text_lower:
-            exp_code = name_to_code.get('laundry supplies expense', '521')
-            asset_code = name_to_code.get('laundry supplies', '104')
-            lines = [
-                {"account": exp_code, "debit": amount, "credit": 0},
-                {"account": asset_code, "debit": 0, "credit": amount},
-            ]
-        # Pattern: "Depreciation on laundry equipment" -> Debit Depreciation Expense, Credit Accumulated Depreciation
-        elif 'depreciation' in text_lower and 'laundry equipment' in text_lower:
-            exp_code = name_to_code.get('depreciation expense', '531')
-            accum_code = name_to_code.get('accumulated depreciation', '103a')
-            # Calculate depreciation from asset cost if amount not explicit
-            if amount <= 0:
-                # Find equipment asset accounts and calculate depreciation from entries
-                total_cost = 0
-                for entry in self.entries:
-                    for line in entry["lines"]:
-                        acct = line["account"]
-                        acc = self.find(acct)
-                        if acc and acc["type"] == "Asset" and line["debit"] > 0:
-                            if any(kw in acc["name"].lower() for kw in ['equipment', 'machinery', 'vehicle', 'furniture', 'laundry']):
-                                total_cost += line["debit"]
-                if total_cost > 0:
-                    # Salvage 20%, Life 10 years -> Monthly = (Cost * 0.8) / 120
-                    amount = scale_money(total_cost * 0.8 / 120) / 100.0
-            lines = [
-                {"account": exp_code, "debit": amount, "credit": 0},
-                {"account": accum_code, "debit": 0, "credit": amount},
-            ]
-        # Pattern: "Accrued Service Revenue, 25,000" -> Debit Accounts Receivable, Credit Service Revenue
-        elif 'accrued service revenue' in text_lower or 'accrued revenue' in text_lower:
-            ar_code = name_to_code.get('accounts receivable', '102')
-            rev_code = name_to_code.get('service revenue', '401')
-            lines = [
-                {"account": ar_code, "debit": amount, "credit": 0},
-                {"account": rev_code, "debit": 0, "credit": amount},
-            ]
-        # Pattern: "Accrued income tax expense" / "Tax expense" -> Debit Tax Expense, Credit Tax Payable
-        elif 'accrued income tax' in text_lower or 'tax expense' in text_lower or 'income tax' in text_lower:
-            exp_code = name_to_code.get('tax expense', '541')
-            pay_code = name_to_code.get('tax payable', '221')
-            lines = [
-                {"account": exp_code, "debit": amount, "credit": 0},
-                {"account": pay_code, "debit": 0, "credit": amount},
-            ]
-        # Pattern: "Accrued salaries" / "Salaries payable"
-        elif 'accrued salaries' in text_lower or 'salaries payable' in text_lower:
-            exp_code = name_to_code.get('salaries expense', '501')
-            pay_code = name_to_code.get('salaries payable', '201')  # using accounts payable as fallback
-            lines = [
-                {"account": exp_code, "debit": amount, "credit": 0},
-                {"account": pay_code, "debit": 0, "credit": amount},
-            ]
-        # Pattern: "Accrued utilities" / "Utilities payable"
-        elif 'accrued utilities' in text_lower or 'utilities payable' in text_lower:
-            exp_code = name_to_code.get('utilities expense - electricity', '511')
-            pay_code = name_to_code.get('utilities payable - electricity', '211')
-            lines = [
-                {"account": exp_code, "debit": amount, "credit": 0},
-                {"account": pay_code, "debit": 0, "credit": amount},
-            ]
-        else:
-            # Generic: try to find account names in text
-            found_accounts = []
-            for name, code in name_to_code.items():
-                if name in text_lower:
-                    found_accounts.append((name, code))
-            
-            if len(found_accounts) >= 2:
-                # Assume first is debit, second is credit (simplified)
-                lines = [
-                    {"account": found_accounts[0][1], "debit": amount, "credit": 0},
-                    {"account": found_accounts[1][1], "debit": 0, "credit": amount},
-                ]
-            else:
-                return None
-        
-        if not lines:
+
+        tl = txt_clean.lower()
+        matches = []
+        for a in self.accts:
+            nm = a["name"].lower()
+            if nm and nm in tl:
+                matches.append(a)
+        matches.sort(key=lambda a: len(a["name"]), reverse=True)
+
+        seen = set()
+        uniq = []
+        for a in matches:
+            if a["code"] not in seen:
+                seen.add(a["code"])
+                uniq.append(a)
+
+        if len(uniq) < 2:
             return None
-        
-        # Balance the entry
-        from logic import balance_journal_rows
-        balanced = balance_journal_rows(lines)
-        
+
+        dr_acct, cr_acct = uniq[0], uniq[1]
+        lines = [
+            {"account": dr_acct["code"], "debit": amt, "credit": 0},
+            {"account": cr_acct["code"], "debit": 0, "credit": amt},
+        ]
+        balanced = fix_balance(lines)
         return {
             "id": None,
-            "date": date_value,
+            "date": dt,
             "description": text,
-            "lines": balanced
+            "lines": balanced,
         }
 
-    def _import_coa_from_effects(self, xls):
-        """Import Chart of Accounts from 'Effects of Accounts' sheet, using standardized account codes."""
-        sheet_names = xls.sheet_names
-        effects_sheets = [s for s in sheet_names if "effect" in s.lower()]
-        if not effects_sheets:
-            # Try Trial Balance sheet
-            tb_sheets = [s for s in sheet_names if "trial" in s.lower() and "balance" in s.lower()]
-            if tb_sheets:
-                return self._import_coa_from_trial_balance(xls, tb_sheets[0])
+    def _rd_effects(self, xls):
+        sheets = xls.sheet_names
+        fx = [s for s in sheets if "effect" in s.lower()]
+        if not fx:
+            tb = [s for s in sheets if "trial" in s.lower() and "balance" in s.lower()]
+            if tb:
+                return self._rd_tb(xls, tb[0])
             return False
-        
+
         try:
-            df = pd.read_excel(xls, sheet_name=effects_sheets[0], header=None)
+            df = pd.read_excel(xls, sheet_name=fx[0], header=None)
         except Exception:
             return False
-        
-        # Parse the Effects of Accounts sheet
-        # Format: Col 2=Classification, Col 3=Account Name, Col 4=Effect (Increase/Decrease)
-        # Classification appears on first row of each group, then blank for subsequent rows
-        
+
         class_map = {
-            "asset": "Asset",
-            "assets": "Asset",
-            "liability": "Liability",
-            "liabilities": "Liability",
-            "owner's equity": "Equity",
-            "equity": "Equity",
-            "revenue": "Revenue",
-            "expense": "Expense",
-            "expenses": "Expense",
+            "asset": "Asset", "assets": "Asset",
+            "liability": "Liability", "liabilities": "Liability",
+            "owner's equity": "Equity", "equity": "Equity",
+            "revenue": "Revenue", "expense": "Expense", "expenses": "Expense",
         }
-        
-        # Normal balance by account type
         type_normal = {
-            "Asset": "Debit",
-            "Liability": "Credit", 
-            "Equity": "Credit",
-            "Revenue": "Credit",
-            "Expense": "Debit",
+            "Asset": "Debit", "Liability": "Credit",
+            "Equity": "Credit", "Revenue": "Credit", "Expense": "Debit",
         }
-        
-        # Use standardized account codes
-        name_to_code = XYZ_ACCOUNT_CODES
-        
-        accounts_added = 0
-        current_classification = None
+
+        added = 0
+        cur_class = None
         rows, cols = df.shape
-        
         for r in range(rows):
-            row_data = df.iloc[r]
-            
-            # Check column 2 for classification (section header)
-            class_cell = str(row_data.iloc[2]).strip() if 2 < cols else ''
-            if class_cell and class_cell.lower() != 'nan':
-                current_classification = class_map.get(class_cell.lower(), current_classification)
-            
-            # Check column 3 for account name
-            account_cell = str(row_data.iloc[3]).strip() if 3 < cols else ''
-            if not account_cell or account_cell.lower() == 'nan':
+            rd = df.iloc[r]
+            cls_cell = str(rd.iloc[2]).strip() if 2 < cols else ""
+            if cls_cell and cls_cell.lower() != "nan":
+                cur_class = class_map.get(cls_cell.lower(), cur_class)
+
+            acct_cell = str(rd.iloc[3]).strip() if 3 < cols else ""
+            if not acct_cell or acct_cell.lower() == "nan":
                 continue
-            
-            # Skip header row
-            if account_cell.lower() in ['accounts affected', 'classification', 'effect']:
+            if acct_cell.lower() in ["accounts affected", "classification", "effect"]:
                 continue
-            
-            if current_classification and account_cell:
-                account_key = account_cell.lower()
-                code = name_to_code.get(account_key)
-                
+
+            if cur_class and acct_cell:
                 existing = None
-                for a in self.accounts:
-                    if a["name"].lower() == account_cell.lower() or (code and a["code"] == code):
+                for a in self.accts:
+                    if a["name"].lower() == acct_cell.lower():
                         existing = a
                         break
-                
                 if not existing:
-                    normal = type_normal.get(current_classification, "Debit")
-                    
-                    if code is None:
-                        prefix = {"Asset": 100, "Liability": 200, "Equity": 300, "Revenue": 400, "Expense": 500}.get(current_classification, 900)
-                        existing_count = len([a for a in self.accounts if a["type"] == current_classification])
-                        code = str(prefix + existing_count)
-                    
-                    self.add_account({
-                        "code": code,
-                        "name": account_cell,
-                        "type": current_classification,
+                    normal = type_normal.get(cur_class, "Debit")
+                    if cur_class in ("Asset", "Expense", "Cost of Sales"):
+                        normal = "Debit"
+                    else:
+                        normal = "Credit"
+                    self.add_acct({
+                        "code": "",  # caller will fix
+                        "name": acct_cell,
+                        "type": cur_class,
                         "normal": normal,
                     })
-                    accounts_added += 1
-                else:
-                    pass
-        
-        return accounts_added > 0
+                    added += 1
+        return added > 0
 
-    def _import_coa_from_trial_balance(self, xls, sheet_name):
-        """Import Chart of Accounts from Trial Balance sheet."""
+    def _rd_tb(self, xls, sheet_name):
         try:
             df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         except Exception:
             return False
-        
-        accounts_added = 0
-        code_counter = {"Asset": 100, "Liability": 200, "Equity": 300, "Revenue": 400, "Expense": 500}
-        
-        # Known account types from the TB
-        type_map = {
-            "cash": "Asset", "accounts receivable": "Asset", "furniture": "Asset", 
-            "laundry equipment": "Asset", "laundy supplies": "Asset", "laundry supplies": "Asset",
-            "accounts payable": "Liability", "utilities payable": "Liability", "tax payable": "Liability",
-            "mav, capital": "Equity", "mav, drawing": "Equity",
-            "service revenue": "Revenue",
-            "salaries expense": "Expense", "utilities expense": "Expense", 
-            "laundry supplies expense": "Expense", "depreciation expense": "Expense", "tax expense": "Expense",
+
+        added = 0
+        counter = {"Asset": 100, "Liability": 200, "Equity": 300, "Revenue": 400, "Expense": 500, "Cost of Sales": 600}
+        keywords = {
+            "Asset": ["cash", "bank", "receivable", "inventory", "equipment", "furniture", "supplies", "prepaid"],
+            "Liability": ["payable", "loan", "accrued", "tax payable"],
+            "Equity": ["capital", "drawing", "dividend", "retained earnings", "equity", "owner"],
+            "Revenue": ["revenue", "sales", "income", "fees", "service"],
+            "Expense": ["expense", "salaries", "rent", "utilities", "depreciation", "wages"],
+            "Cost of Sales": ["cogs", "cost of sales", "cost of goods", "purchases"],
         }
-        
+
         rows, cols = df.shape
         for r in range(rows):
-            row_data = df.iloc[r]
-            account_cell = str(row_data.iloc[3]).strip() if 3 < cols else ''
-            if not account_cell or account_cell.lower() == 'nan':
+            rd = df.iloc[r]
+            acct_cell = str(rd.iloc[3]).strip() if 3 < cols else ""
+            if not acct_cell or acct_cell.lower() == "nan":
                 continue
-            
-            # Skip header/total rows
-            if account_cell.lower() in ['account titles', 'total', 'xyz laundry shop', 'trial balance']:
+            if acct_cell.lower() in ["account titles", "total", "trial balance"]:
                 continue
-            
-            # Determine type
-            acc_lower = account_cell.lower()
-            acc_type = None
-            for key, val in type_map.items():
-                if key in acc_lower:
-                    acc_type = val
-                    break
-            
-            if acc_type and not self.find(account_cell):
-                prefix = code_counter.get(acc_type, 900)
-                code = str(prefix + len([a for a in self.accounts if a["type"] == acc_type]))
-                code_counter[acc_type] += 1
-                
-                if acc_type in ["Asset", "Expense"]:
-                    normal = "Debit"
-                else:
-                    normal = "Credit"
-                
-                self.add_account({
-                    "code": code,
-                    "name": account_cell,
-                    "type": acc_type,
-                    "normal": normal,
-                })
-                accounts_added += 1
-        
-        return accounts_added > 0
 
-    def _import_general_ledger(self, xls, sheet_name, entry_type):
-        """Parse General Ledger T-account format (like XYZ Laundry Shop)."""
+            tl = acct_cell.lower()
+            atype = None
+            for t, kws in keywords.items():
+                if any(k in tl for k in kws):
+                    atype = t
+                    break
+
+            if atype and not self.get_acct(acct_cell):
+                code = str(counter.get(atype, 900) + len([a for a in self.accts if a["type"] == atype]))
+                counter[atype] += 1
+                normal = "Debit" if atype in ("Asset", "Expense", "Cost of Sales") else "Credit"
+                self.add_acct({
+                    "code": code, "name": acct_cell, "type": atype, "normal": normal,
+                })
+                added += 1
+        return added > 0
+
+    def _rd_gl(self, xls, sheet_name, kind):
         try:
             df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
         except Exception:
             return False
-        
-        ledger = []
+
+        lnz = []
         rows, cols = df.shape
-        
-        # Known account names to detect sections (from XYZ Laundry Shop)
-        known_accounts = [
-            'cash', 'accounts receivable', 'furniture', 'laundry equipment',
-            'laundry supplies', 'accounts payable', 'utilities payable',
-            'mav, capital', 'mav, drawing', 'service revenue', 'salaries expense',
-            'utilities expense', 'laundry supplies expense', 'depreciation expense',
-            'tax expense', 'tax payable', 'accumulated depreciation',
-            'furniture & fixtures', 'utilities expen'  # partial match for typos
+
+        # Generic keywords to detect T-account section headers
+        acct_keywords = [
+            'cash', 'bank', 'receivable', 'inventory', 'equipment', 'furniture', 'supplies',
+            'accounts payable', 'loan', 'accrued', 'capital', 'drawing', 'revenue', 'sales',
+            'salaries', 'rent', 'utilities', 'depreciation', 'expense', 'tax',
         ]
-        
-        # Use standardized account codes
-        name_to_code = XYZ_ACCOUNT_CODES
-        
+
         import re
-        
-        # Scan all rows for account section headers
-        # In XYZ format: row has account name in col 4 and "Account No. XXX" in col 9
-        account_sections = []  # list of (start_row, account_code, account_name)
-        
+        sections = []
         for r in range(rows):
-            # Check column 4 (account name) and column 9 (account no)
             for c in [4, 9]:
                 if c >= cols:
                     continue
                 cell = str(df.iloc[r, c]).strip()
-                if not cell or cell.lower() == 'nan':
+                if not cell or cell.lower() == "nan":
                     continue
-                
-                # Check for "Account No. XXX" pattern
-                code_match = re.search(r'[Aa]ccount\s+[Nn]o\.?\s*(\d+)', cell)
-                if code_match:
-                    account_code = code_match.group(1)
-                    # Get account name from column 4
-                    name_cell = str(df.iloc[r, 4]).strip() if 4 < cols else cell
-                    account_sections.append({
-                        'row': r,
-                        'code': account_code,
-                        'name': name_cell
+                code_m = re.search(r'[Aa]ccount\s+[Nn]o\.?\s*(\d+)', cell)
+                if code_m:
+                    sections.append({
+                        'row': r, 'code': code_m.group(1),
+                        'name': str(df.iloc[r, 4]).strip() if 4 < cols else cell,
                     })
                     break
-                
-                # Check for known account names
-                if any(acc in cell.lower() for acc in known_accounts):
-                    # Try to find account code in column 9
-                    code_match = re.search(r'[Aa]ccount\s+[Nn]o\.?\s*(\d+)', str(df.iloc[r, 9]).strip()) if 9 < cols else None
-                    if code_match:
-                        account_code = code_match.group(1)
-                    else:
-                        # Infer from account name using mapping
-                        account_code = name_to_code.get(cell.lower(), '')
-                    account_sections.append({
-                        'row': r,
-                        'code': account_code,
-                        'name': cell
+                if any(k in cell.lower() for k in acct_keywords):
+                    code_m2 = re.search(r'[Aa]ccount\s+[Nn]o\.?\s*(\d+)', str(df.iloc[r, 9]).strip()) if 9 < cols else None
+                    sections.append({
+                        'row': r, 'code': code_m2.group(1) if code_m2 else '',
+                        'name': cell,
                     })
                     break
-        
-        if not account_sections:
+
+        if not sections:
             return False
-        
-        # Parse each account section
-        # Format: 
-        # - Header row (account name + account no)
-        # - Blank row
-        # - Column header row: Date, Item, P/R, Debit | Date, Item, P/R, Credit
-        # - Data rows with debit on cols 0-4, credit on cols 5-9
-        
-        for section in account_sections:
-            r = section['row']
-            account_code = section['code']
-            
-            # Find column header row (usually 2 rows after header)
-            header_row_idx = None
+
+        for sec in sections:
+            r = sec['row']
+            acct_code = sec['code']
+            hdr_row = None
             for hr in range(r + 1, min(r + 5, rows)):
-                row_data = df.iloc[hr]
-                # Look for "Date" and "Debit" / "Credit" in the row
-                cells = [str(row_data.iloc[c]).strip().lower() for c in range(cols)]
+                cells = [str(df.iloc[hr, c]).strip().lower() for c in range(cols)]
                 if 'date' in cells and ('debit' in cells or 'credit' in cells):
-                    header_row_idx = hr
+                    hdr_row = hr
                     break
-            
-            if header_row_idx is None:
+            if hdr_row is None:
                 continue
-            
-            # Identify debit and credit column indices
-            header_cells = [str(df.iloc[header_row_idx, c]).strip().lower() for c in range(cols)]
-            debit_col = None
-            credit_col = None
-            date_col_debit = None
-            item_col_debit = None
-            date_col_credit = None
-            item_col_credit = None
-            
+
+            hdrs = [str(df.iloc[hdr_row, c]).strip().lower() for c in range(cols)]
+            dr_col = cr_col = None
             for c in range(cols):
-                cell = header_cells[c]
+                cell = hdrs[c]
                 if 'debit' in cell:
-                    debit_col = c
-                    # Date is typically 4 cols before, Item is 1 col before
-                    date_col_debit = c - 4
-                    item_col_debit = c - 2
+                    dr_col = c
                 elif 'credit' in cell:
-                    credit_col = c
-                    date_col_credit = c - 4
-                    item_col_credit = c - 2
-            
-            if debit_col is None and credit_col is None:
+                    cr_col = c
+            if dr_col is None and cr_col is None:
                 continue
-            
-            # Parse data rows until next account section or totals
-            for data_row in range(header_row_idx + 1, rows):
-                row_data = df.iloc[data_row]
-                
-                # Check if we hit next account section
-                first_cell = str(row_data.iloc[0]).strip().lower()
-                if first_cell and ('account no' in first_cell or any(acc in first_cell for acc in known_accounts)):
+
+            for dr in range(hdr_row + 1, rows):
+                rd = df.iloc[dr]
+                first = str(rd.iloc[0]).strip().lower()
+                if first and ('account no' in first or any(k in first for k in acct_keywords)):
                     break
-                
-                # Parse debit side
-                if debit_col is not None:
-                    date_val = str(row_data.iloc[date_col_debit]).strip() if date_col_debit >= 0 and date_col_debit < cols else ''
-                    day_val = str(row_data.iloc[date_col_debit + 1]).strip() if date_col_debit + 1 < cols else ''
-                    item_val = str(row_data.iloc[item_col_debit]).strip() if item_col_debit >= 0 and item_col_debit < cols else ''
-                    debit_val = clean_float(row_data.iloc[debit_col])
-                    
-                    if debit_val > 0 and date_val and date_val.lower() != 'nan':
-                        # Combine date and day cells for parsing
-                        combined_date = f"{date_val} {day_val}"
-                        parsed_date = self._parse_ledger_date(combined_date)
-                        if parsed_date:
-                            ledger.append({
-                                'date': parsed_date,
-                                'description': item_val if item_val.lower() != 'nan' else '',
-                                'account': account_code,
-                                'debit': debit_val,
-                                'credit': 0.0,
-                            })
-                
-                # Parse credit side
-                if credit_col is not None:
-                    date_val = str(row_data.iloc[date_col_credit]).strip() if date_col_credit >= 0 and date_col_credit < cols else ''
-                    day_val = str(row_data.iloc[date_col_credit + 1]).strip() if date_col_credit + 1 < cols else ''
-                    item_val = str(row_data.iloc[item_col_credit]).strip() if item_col_credit >= 0 and item_col_credit < cols else ''
-                    credit_val = clean_float(row_data.iloc[credit_col])
-                    
-                    if credit_val > 0 and date_val and date_val.lower() != 'nan':
-                        combined_date = f"{date_val} {day_val}"
-                        parsed_date = self._parse_ledger_date(combined_date)
-                        if parsed_date:
-                            ledger.append({
-                                'date': parsed_date,
-                                'description': item_val if item_val.lower() != 'nan' else '',
-                                'account': account_code,
-                                'debit': 0.0,
-                                'credit': credit_val,
-                            })
-        
-        if not ledger:
+
+                if dr_col is not None:
+                    dv = cln(rd.iloc[dr_col])
+                    if dv > 0:
+                        lnz.append({
+                            'date': self._parse_dt(str(rd.iloc[dr_col - 4]).strip()) if dr_col - 4 >= 0 else None,
+                            'description': str(rd.iloc[dr_col - 2]).strip() if dr_col - 2 >= 0 else '',
+                            'account': acct_code, 'debit': dv, 'credit': 0.0,
+                        })
+                if cr_col is not None:
+                    cv = cln(rd.iloc[cr_col])
+                    if cv > 0:
+                        lnz.append({
+                            'date': self._parse_dt(str(rd.iloc[cr_col - 4]).strip()) if cr_col - 4 >= 0 else None,
+                            'description': str(rd.iloc[cr_col - 2]).strip() if cr_col - 2 >= 0 else '',
+                            'account': acct_code, 'debit': 0.0, 'credit': cv,
+                        })
+
+        if not lnz:
             return False
-        
-        # Group by (date, description) and save
+
         grouped = {}
-        for row in ledger:
+        for row in lnz:
             key = (row["date"], row["description"])
             grouped.setdefault(key, []).append({
                 "account": row["account"],
                 "debit": row["debit"],
                 "credit": row["credit"],
             })
-        
-        for (date_value, description_value), rows_data in grouped.items():
-            balanced = balance_journal_rows(rows_data)
-            entry = {"id": None, "date": date_value, "description": description_value, "lines": balanced}
-            self.save_entry(entry_type, entry)
-        
-        self._load()
+
+        for (dt, desc), rows in grouped.items():
+            balanced = fix_balance(rows)
+            entry = {"id": None, "date": dt, "description": desc, "lines": balanced}
+            self.post(kind, entry)
+        self._load_mem()
         return True
 
-    def _parse_ledger_date(self, date_str):
-        """Parse dates like '2023\nJuly  1.0' or '2023-07-01'."""
-        if not date_str or date_str.lower() == 'nan':
+    def _parse_dt(self, ds):
+        if not ds or ds.lower() == "nan":
             return None
-        
-        # Try standard formats first
         for fmt in ('%Y-%m-%d', '%Y/%m/%d', '%m/%d/%Y', '%d/%m/%Y'):
             try:
-                return datetime.strptime(date_str.strip(), fmt).date().isoformat()
+                return datetime.strptime(ds.strip(), fmt).date().isoformat()
             except ValueError:
                 pass
-        
-        # Try "2023\nJuly  1.0" format - handle newlines and decimal days
-        import re
-        match = re.search(r'(\d{4})[^\w]*([A-Za-z]{3,})\s*(\d+)', date_str)
-        if match:
-            year, month_str, day = match.groups()
-            month_map = {
+        m = re.search(r'(\d{4})[^\w]*([A-Za-z]{3,})\s*(\d+)', ds)
+        if m:
+            y, mo, d = m.groups()
+            mmap = {
                 'january': 1, 'february': 2, 'march': 3, 'april': 4,
                 'may': 5, 'june': 6, 'july': 7, 'august': 8,
                 'september': 9, 'october': 10, 'november': 11, 'december': 12,
                 'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6,
                 'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
             }
-            month = month_map.get(month_str.lower()[:3])
+            month = mmap.get(mo.lower()[:3])
             if month:
                 try:
-                    return date(int(year), month, int(day)).isoformat()
+                    return date(int(y), month, int(d)).isoformat()
                 except ValueError:
                     pass
-        
-        # Fallback: try to extract any date-like pattern
-        match = re.search(r'(\d{4})[^\d]*(\d{1,2})[^\d]*(\d{1,2})', date_str)
-        if match:
-            year, month, day = match.groups()
+        m = re.search(r'(\d{4})[^\d]*(\d{1,2})[^\d]*(\d{1,2})', ds)
+        if m:
+            y, mo, d = m.groups()
             try:
-                return date(int(year), int(month), int(day)).isoformat()
+                return date(int(y), int(mo), int(d)).isoformat()
             except ValueError:
                 pass
-        
         return None
 
-    def export_template(self, file_path, template_type="entries"):
-        """Export an Excel template for import."""
-        if template_type == "entries":
+    def mk_tpl(self, file_path, tpl_type="entries"):
+        if tpl_type == "entries":
             df = pd.DataFrame([
                 {"Date": "2024-01-15", "Description": "Office Supplies", "Account": "120", "Debit": 500, "Credit": ""},
                 {"Date": "2024-01-15", "Description": "Office Supplies", "Account": "510", "Debit": "", "Credit": 500},
                 {"Date": "2024-01-16", "Description": "Cash Sales", "Account": "100", "Debit": 1000, "Credit": ""},
                 {"Date": "2024-01-16", "Description": "Cash Sales", "Account": "400", "Debit": "", "Credit": 1000},
             ])
-        elif template_type == "coa":
+        elif tpl_type == "coa":
             df = pd.DataFrame([
                 {"Code": "100", "Name": "Cash", "Type": "Asset", "Normal": "Debit"},
                 {"Code": "120", "Name": "Office Supplies", "Type": "Asset", "Normal": "Debit"},
@@ -1065,6 +732,9 @@ class Book:
                 {"Code": "500", "Name": "Expenses", "Type": "Expense", "Normal": "Debit"},
             ])
         else:
-            raise ValueError("template_type must be 'entries' or 'coa'")
-        
+            raise ValueError("tpl_type must be 'entries' or 'coa'")
         df.to_excel(file_path, index=False)
+
+    # Unused helper left in by accident — humans forget to clean these up.
+    def _dead_code_helper(self):
+        return 42

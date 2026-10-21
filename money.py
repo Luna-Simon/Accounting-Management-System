@@ -1,8 +1,8 @@
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 
-def parse(text):
-    cleaned = text.replace(",", "").strip()
+def parse(txt):
+    cleaned = txt.replace(",", "").strip()
     if not cleaned:
         return 0
     try:
@@ -10,7 +10,7 @@ def parse(text):
         if not value.is_finite():
             raise InvalidOperation
     except InvalidOperation:
-        raise ValueError(f"'{text.strip()}' is not a valid amount.") from None
+        raise ValueError(f"'{txt.strip()}' is not a valid amount.") from None
     return int((value * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 

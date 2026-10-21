@@ -1,4 +1,9 @@
+"""
+Reusable UI widgets.
+"""
+
 import csv
+import tkinter as tk
 from tkinter import ttk
 
 from . import theme
@@ -9,44 +14,38 @@ def col(title, width, anchor="w", stretch=False):
 
 
 class Table(ttk.Frame):
-    """Excel/Sheets-style data table with clean dark theme."""
-    
     def __init__(self, parent, columns, height=12):
         super().__init__(parent)
         self.columns = columns
         self.data = []
         ids = [f"c{i}" for i in range(len(columns))]
-        
-        # Treeview with minimal styling
-        self.tree = ttk.Treeview(self, columns=ids, show="headings", selectmode="extended", height=height)
+
+        self.tree = ttk.Treeview(self, columns=ids, show="headings",
+                                 selectmode="extended", height=height)
         for cid, (title, width, anchor, stretch) in zip(ids, columns):
             self.tree.heading(cid, text=title, anchor=anchor)
-            self.tree.column(cid, width=width, anchor=anchor, stretch=stretch, minwidth=50)
-        
-        # Row tags for alternating colors
+            self.tree.column(cid, width=width, anchor=anchor, stretch=stretch, minwidth=60)
+
         self.tree.tag_configure("even", background=theme.BG)
         self.tree.tag_configure("odd", background=theme.PANEL)
         self.tree.tag_configure("total", background=theme.PANEL)
-        self.tree.tag_configure("credit", foreground=theme.SUCCESS)
-        self.tree.tag_configure("debit", foreground=theme.TEXT)
-        # Apply bold font if theme is initialized
         if theme.bold_font:
             self.tree.tag_configure("total", font=theme.bold_font)
-        
-        # Scrollbars
-        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview, style="Vertical.TScrollbar")
-        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview, style="Horizontal.TScrollbar")
+
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview,
+                                 style="Vertical.TScrollbar")
+        self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview,
+                                 style="Horizontal.TScrollbar")
         self.tree.configure(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
-        
+
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.vsb.grid(row=0, column=1, sticky="ns")
         self.hsb.grid(row=1, column=0, sticky="ew")
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
-        
-        # Bindings for Excel-like behavior
-        self.tree.bind("<Control-c>", self.copy_selection)
-        self.tree.bind("<Control-a>", self.select_all)
+
+        self.tree.bind("<Control-c>", self.copy_sel)
+        self.tree.bind("<Control-a>", self.sel_all)
 
     def clear(self):
         self.tree.delete(*self.tree.get_children())
@@ -62,8 +61,7 @@ class Table(ttk.Frame):
         chosen = self.tree.selection()
         return chosen[0] if chosen else None
 
-    def copy_selection(self, event=None):
-        """Copy selected rows as tab-separated values."""
+    def copy_sel(self, event=None):
         items = self.tree.selection()
         if not items:
             return
@@ -73,7 +71,7 @@ class Table(ttk.Frame):
         self.clipboard_clear()
         self.clipboard_append("\n".join(rows))
 
-    def select_all(self, event=None):
+    def sel_all(self, event=None):
         self.tree.selection_set(self.tree.get_children())
 
     def export_csv(self, path):
@@ -84,33 +82,35 @@ class Table(ttk.Frame):
 
 
 class Card(ttk.LabelFrame):
-    """Apple-style card container."""
-    
     def __init__(self, parent, title="", **kwargs):
-        super().__init__(parent, text=title, style="Card.TLabelframe", padding=16, **kwargs)
+        super().__init__(parent, text=title, style="Card.TLabelframe", padding=14, **kwargs)
         self.columnconfigure(0, weight=1)
 
 
-class StatCard(ttk.Frame):
-    """Dashboard stat card with icon, value, and label."""
-    
+class HelpLabel(tk.Label):
+    def __init__(self, parent, text, bg=None, **kwargs):
+        super().__init__(parent, text=text, bg=bg or theme.BG, fg=theme.TEXT_DIM,
+                         font=("Segoe UI", 9), **kwargs)
+        self.configure(anchor="w", justify="left")
+
+
+class StatCard(tk.Frame):
     def __init__(self, parent, label, value="0", icon="", **kwargs):
-        super().__init__(parent, style="Card.TFrame", **kwargs)
-        self.configure(padding=20)
-        
-        # Icon/label row
-        top = ttk.Frame(self)
+        super().__init__(parent, bg=theme.PANEL, **kwargs)
+        self.configure(padx=14, pady=14, highlightbackground=theme.LINE,
+                       highlightthickness=1)
+
+        top = tk.Frame(self, bg=theme.PANEL)
         top.pack(fill="x")
         if icon:
-            ttk.Label(top, text=icon, font=("Segoe UI", 20)).pack(side="left")
-        ttk.Label(top, text=label, style="Muted.TLabel").pack(side="left", padx=(8 if icon else 0, 0))
-        
-        # Value
+            tk.Label(top, text=icon, bg=theme.PANEL, fg=theme.TEXT,
+                     font=("Segoe UI", 16)).pack(side="left")
+        tk.Label(top, text=label, bg=theme.PANEL, fg=theme.TEXT_DIM,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(8 if icon else 0, 0))
+
         self.value_var = tk.StringVar(value=value)
-        ttk.Label(self, textvariable=self.value_var, style="CardValue.TLabel").pack(anchor="w", pady=(8, 0))
-        
+        tk.Label(self, textvariable=self.value_var, bg=theme.PANEL, fg=theme.TEXT,
+                 font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(8, 0))
+
     def set_value(self, value):
         self.value_var.set(value)
-
-
-import tkinter as tk

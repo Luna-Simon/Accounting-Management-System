@@ -1,13 +1,14 @@
 # Accounting Management System
 
-A desktop double-entry bookkeeping application built with **Python** and **Tkinter**, featuring Excel import/export, a Chart of Accounts, journal entries, trial balance, and local SQLite storage.
+A desktop double-entry bookkeeping application built with **Python** and **Tkinter**, featuring Excel import/export, a Chart of Accounts, journal entries, trial balance, worksheet, income statement, local SQLite storage, and a depreciation calculator.
 
 ## Features
 
 - **Double-entry bookkeeping** — journals, adjustments, and auto-balanced entries
-- **Chart of Accounts** — add, edit, and manage account codes/names/types
-- **Business Transactions & Adjustments tabs** — enter journal entries manually
-- **Trial Balance** — view debit/credit totals per account
+- **Chart of Accounts** — add, edit, and manage account codes/names/types with working Type and Normal Balance dropdowns
+- **Business Transactions & Adjustments tabs** — enter journal entries manually with account dropdowns that refresh when COA changes
+- **Trial Balance** — Unadjusted and Adjusted views with working numbers, plus a full **Worksheet** view (Trial Balance \| Adjustments \| Adjusted Trial Balance \| Income Statement \| Balance Sheet)
+- **Depreciation Calculator** — straight-line depreciation with built-in posting to Adjustments
 - **Excel Import** — import Chart of Accounts, transactions, adjustments, and General Ledger (T-account) worksheets from `.xlsx`/`.xls`
 - **Excel/CSV Export** — export the current tab to CSV; export import templates to Excel
 - **Local SQLite database** — data stored in `accounting.db` (ignored by git)
@@ -60,10 +61,10 @@ The app opens with a `1300x800` window containing these tabs:
 | Tab | Purpose |
 |-----|---------|
 | Dashboard | Overview of the books |
-| Trial Balance | Debit/credit summary per account |
-| Chart of Accounts | Manage account codes, names, types |
+| Trial Balance | Unadjusted/Adjusted trial balance + full Worksheet view |
+| Chart of Accounts | Manage account codes, names, types, normal balances |
 | Business Transactions | Enter regular journal entries |
-| Adjustments | Enter adjusting journal entries |
+| Adjustments | Enter adjusting entries (accruals, deferrals, depreciation) |
 
 ## Excel Import Guide
 
@@ -91,7 +92,24 @@ Use **File → Import Chart of Accounts** for COA, or open the **Business Transa
 | `Ctrl+C` | Copy selected rows |
 | `Double-click` | Edit an entry |
 | `Tab` / `Enter` | Next field in entry form |
+| `Ctrl+Enter` | Post / Update entry (entry form) |
+| `F5` | Refresh account dropdowns (entry form) |
 | `Escape` | Clear form |
+
+## Depreciation Calculator
+
+Open the **Trial Balance** tab and click **Depreciation…** to compute straight-line depreciation:
+
+```
+(Cost − Residual Value) ÷ Useful Life = Annual Depreciation
+Annual ÷ 12 = Monthly Depreciation
+```
+
+The dialog posts the result directly as an adjusting entry:
+- **Debit:** Depreciation Expense
+- **Credit:** Accumulated Depreciation (contra-asset)
+
+This updates the Adjusted Trial Balance and Worksheet automatically.
 
 ## License
 
