@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*.tmp
+*.temp
+check_*.py
+debug_*.py
+test_*.py
+*.log
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# JDK / Java (not needed for Python project)
+oracleJdk-27/
+
+# Database files created during testing
+*.db-journal
+tmp_*.db
+
+# Excel test files
+test_*.xlsx
