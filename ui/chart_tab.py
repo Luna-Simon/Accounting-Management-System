@@ -44,12 +44,18 @@ class ChartTab(ttk.Frame):
         self.type_var = tk.StringVar(value=TYPES[0])
         type_combo = ttk.Combobox(form_card, textvariable=self.type_var, values=TYPES, state="readonly", width=18)
         type_combo.grid(row=2, column=1, sticky="w", pady=6)
-        type_combo.bind("<<ComboboxSelected>>", lambda e: self.normal_var.set(DEFAULT_NORMAL[self.type_var.get()]))
 
         ttk.Label(form_card, text="Normal Balance").grid(row=3, column=0, sticky="w", padx=(0, 12), pady=6)
         self.normal_var = tk.StringVar(value=DEFAULT_NORMAL[TYPES[0]])
-        ttk.Combobox(form_card, textvariable=self.normal_var, values=["Debit", "Credit"],
+        normal_combo = ttk.Combobox(form_card, textvariable=self.normal_var, values=["Debit", "Credit"],
                      state="readonly", width=12).grid(row=3, column=1, sticky="w", pady=6)
+
+        # Auto-update Normal when Type changes (using trace for reliability)
+        def on_type_change(*args):
+            t = self.type_var.get()
+            if t in DEFAULT_NORMAL:
+                self.normal_var.set(DEFAULT_NORMAL[t])
+        self.type_var.trace_add("write", on_type_change)
 
         # Action buttons
         btn_frame = ttk.Frame(form_card)

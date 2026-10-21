@@ -30,10 +30,17 @@ def trial_balance(book, adjusted=False):
     journals = (book.entries, book.adjustments) if adjusted else (book.entries,)
     totals = sums(*journals)
     rows = []
-    for account in book.accounts:
-        if account["code"] in totals:
-            debit, credit = totals[account["code"]]
-            rows.append((account, *side(debit - credit)))
+    # Build a lookup of accounts by code
+    account_map = {a["code"]: a for a in book.accounts}
+    # Include all accounts that have transactions, even if not in COA
+    all_codes = set(totals.keys()) | set(account_map.keys())
+    for code in sorted(all_codes):
+        account = account_map.get(code, {"code": code, "name": code, "type": "", "normal": ""})
+        if code in totals:
+            debit, credit = totals[code]
+        else:
+            debit, credit = 0, 0
+        rows.append((account, *side(debit - credit)))
     return rows
 
 

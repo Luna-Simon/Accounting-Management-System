@@ -295,6 +295,7 @@ class Book:
         1. Simple format (columns: Date, Description, Account, Debit, Credit)
         2. General Ledger T-account format (from accounting worksheets)
         3. Chart of Accounts (columns: Code, Name, Type, Normal)
+        4. Adjustments sheet (text descriptions of adjusting entries)
         
         The importer auto-detects the format based on sheet names and columns.
         """
@@ -324,7 +325,15 @@ class Book:
                 if imported:
                     return
         
-        # 2. Try General Ledger T-account format
+        # 2. Try Adjustments sheet (for entry_type="adjustments")
+        if entry_type == "adjustments":
+            adj_sheets = [s for s in sheet_names if "adjust" in s.lower()]
+            if adj_sheets:
+                imported = self._import_adjustments_from_sheet(xls, adj_sheets[0])
+                if imported:
+                    return
+        
+        # 3. Try General Ledger T-account format
         # Prefer "General Ledger" over "General Journal" for T-account format
         gl_sheets = [s for s in sheet_names if "ledger" in s.lower()]
         if not gl_sheets:
@@ -336,13 +345,13 @@ class Book:
             if imported:
                 return
         
-        # 3. Try simple format on first sheet
+        # 4. Try simple format on first sheet
         df = pd.read_excel(file_path, sheet_name=0)
         imported = self._import_simple_format(df, entry_type)
         if imported:
             return
         
-        # 4. Try all sheets with simple format
+        # 5. Try all sheets with simple format
         for sheet in sheet_names:
             df = pd.read_excel(file_path, sheet_name=sheet)
             imported = self._import_simple_format(df, entry_type)
@@ -364,6 +373,9 @@ class Book:
             "   Normal: Debit or Credit\n\n"
             "3. GENERAL LEDGER (T-account format):\n"
             "   Sheet named 'General Ledger' or 'Ledger' with T-account layout\n\n"
+            "4. ADJUSTMENTS SHEET:\n"
+            "   Sheet named 'Adjustments' with text descriptions\n"
+            "   Example: '(a) Laundry Supplies used, 27,000'\n\n"
             "Use File → Import Chart of Accounts for COA, or\n"
             "Business Transactions/Adjustments → Import from Excel for entries."
         )
@@ -396,6 +408,45 @@ class Book:
         
         if not ledger:
             return False
+        
+        # Auto-add any missing accounts to Chart of Accounts before saving entries
+        for row in ledger:
+            acct = row["account"]
+            if not self.find(acct):
+                # Try to resolve account name to code using mapping, otherwise add as-is
+                code = acct
+                name = acct
+                # Check if account_value is actually a name that maps to a code
+                name_lower = acct.lower()
+                if name_lower in XYZ_ACCOUNT_CODES:
+                    code = XYZ_ACCOUNT_CODES[name_lower]
+                    # Find the name from the mapping
+                    for n, c in XYZ_ACCOUNT_CODES.items():
+                        if c == code:
+                            name = n.title()
+                            break
+                # Determine type based on code prefix
+                if code.startswith(('1', '10')):
+                    atype, normal = "Asset", "Debit"
+                elif code.startswith('2'):
+                    atype, normal = "Liability", "Credit"
+                elif code.startswith('3'):
+                    atype, normal = "Equity", "Credit"
+                elif code.startswith('4'):
+                    atype, normal = "Revenue", "Credit"
+                elif code.startswith('5'):
+                    atype, normal = "Expense", "Debit"
+                else:
+                    atype, normal = "Expense", "Debit"
+                try:
+                    self.add_account({
+                        "code": code,
+                        "name": name,
+                        "type": atype,
+                        "normal": normal,
+                    })
+                except ValueError:
+                    pass  # Account might have been added by another row
         
         grouped = {}
         for row in ledger:
@@ -438,6 +489,179 @@ class Book:
             })
             count += 1
         return count > 0
+
+    def _import_adjustments_from_sheet(self, xls, sheet_name):
+        """Import adjustments from an Adjustments sheet with text descriptions."""
+        try:
+            df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+        except Exception:
+            return False
+        
+        # Parse adjustment descriptions from the sheet
+        # Format: text like "(a) Laundry Supplies used, 27,000"
+        adjustments_text = []
+        rows, cols = df.shape
+        
+        for r in range(rows):
+            for c in range(cols):
+                cell = str(df.iloc[r, c]).strip()
+                if not cell or cell.lower() == 'nan':
+                    continue
+                # Skip header rows
+                if any(kw in cell.lower() for kw in ['journalize', 'adjustment', 'following', 'post them']):
+                    continue
+                # Look for adjustment lines like "(a) ...", "(b) ...", etc.
+                if re.match(r'^\([a-z]\)', cell.lower()):
+                    adjustments_text.append(cell)
+        
+        if not adjustments_text:
+            return False
+        
+        # Parse each adjustment and create journal entries
+        # Use a common date (end of period) - we'll use today's date as fallback
+        from datetime import date
+        adj_date = date.today().isoformat()
+        
+        # Try to find a date in the sheet
+        for r in range(rows):
+            for c in range(cols):
+                cell = str(df.iloc[r, c]).strip()
+                if not cell or cell.lower() == 'nan':
+                    continue
+                parsed_date = self._parse_ledger_date(cell)
+                if parsed_date:
+                    adj_date = parsed_date
+                    break
+        
+        imported_count = 0
+        for adj_text in adjustments_text:
+            entry = self._parse_adjustment_text(adj_text, adj_date)
+            if entry:
+                self.save_entry("adjustments", entry)
+                imported_count += 1
+        
+        self._load()
+        return imported_count > 0
+    
+    def _parse_adjustment_text(self, text, date_value):
+        """Parse adjustment text like '(a) Laundry Supplies used, 27,000' into a journal entry."""
+        import re
+        from logic import clean_float
+        
+        # Remove the (a), (b), etc. prefix
+        text_clean = re.sub(r'^\([a-z]\)\s*', '', text, flags=re.IGNORECASE)
+        
+        # Known adjustment patterns from the reference file
+        # We need to map descriptions to account codes using our XYZ_ACCOUNT_CODES
+        name_to_code = XYZ_ACCOUNT_CODES
+        
+        # Try to extract amount from text (look for numbers with commas or plain numbers)
+        amount = 0
+        # Look for pattern like "27,000" or "25,000" or "18,000" or "4,333.33"
+        amount_matches = re.findall(r'([\d,]+\.?\d*)', text_clean)
+        for match in amount_matches:
+            val = clean_float(match)
+            if val > 0 and val >= 100:
+                amount = val
+                break
+        
+        # If no amount found, we'll calculate it for specific adjustment types
+        text_lower = text_clean.lower()
+        
+        # Identify the adjustment type and map to accounts
+        lines = []
+        
+        # Pattern: "Laundry Supplies used, 27,000" -> Debit Laundry Supplies Expense, Credit Laundry Supplies
+        if 'laundry supplies used' in text_lower or 'supplies used' in text_lower:
+            exp_code = name_to_code.get('laundry supplies expense', '521')
+            asset_code = name_to_code.get('laundry supplies', '104')
+            lines = [
+                {"account": exp_code, "debit": amount, "credit": 0},
+                {"account": asset_code, "debit": 0, "credit": amount},
+            ]
+        # Pattern: "Depreciation on laundry equipment" -> Debit Depreciation Expense, Credit Accumulated Depreciation
+        elif 'depreciation' in text_lower and 'laundry equipment' in text_lower:
+            exp_code = name_to_code.get('depreciation expense', '531')
+            accum_code = name_to_code.get('accumulated depreciation', '103a')
+            # Calculate depreciation from asset cost if amount not explicit
+            if amount <= 0:
+                # Find equipment asset accounts and calculate depreciation from entries
+                total_cost = 0
+                for entry in self.entries:
+                    for line in entry["lines"]:
+                        acct = line["account"]
+                        acc = self.find(acct)
+                        if acc and acc["type"] == "Asset" and line["debit"] > 0:
+                            if any(kw in acc["name"].lower() for kw in ['equipment', 'machinery', 'vehicle', 'furniture', 'laundry']):
+                                total_cost += line["debit"]
+                if total_cost > 0:
+                    # Salvage 20%, Life 10 years -> Monthly = (Cost * 0.8) / 120
+                    amount = scale_money(total_cost * 0.8 / 120) / 100.0
+            lines = [
+                {"account": exp_code, "debit": amount, "credit": 0},
+                {"account": accum_code, "debit": 0, "credit": amount},
+            ]
+        # Pattern: "Accrued Service Revenue, 25,000" -> Debit Accounts Receivable, Credit Service Revenue
+        elif 'accrued service revenue' in text_lower or 'accrued revenue' in text_lower:
+            ar_code = name_to_code.get('accounts receivable', '102')
+            rev_code = name_to_code.get('service revenue', '401')
+            lines = [
+                {"account": ar_code, "debit": amount, "credit": 0},
+                {"account": rev_code, "debit": 0, "credit": amount},
+            ]
+        # Pattern: "Accrued income tax expense" / "Tax expense" -> Debit Tax Expense, Credit Tax Payable
+        elif 'accrued income tax' in text_lower or 'tax expense' in text_lower or 'income tax' in text_lower:
+            exp_code = name_to_code.get('tax expense', '541')
+            pay_code = name_to_code.get('tax payable', '221')
+            lines = [
+                {"account": exp_code, "debit": amount, "credit": 0},
+                {"account": pay_code, "debit": 0, "credit": amount},
+            ]
+        # Pattern: "Accrued salaries" / "Salaries payable"
+        elif 'accrued salaries' in text_lower or 'salaries payable' in text_lower:
+            exp_code = name_to_code.get('salaries expense', '501')
+            pay_code = name_to_code.get('salaries payable', '201')  # using accounts payable as fallback
+            lines = [
+                {"account": exp_code, "debit": amount, "credit": 0},
+                {"account": pay_code, "debit": 0, "credit": amount},
+            ]
+        # Pattern: "Accrued utilities" / "Utilities payable"
+        elif 'accrued utilities' in text_lower or 'utilities payable' in text_lower:
+            exp_code = name_to_code.get('utilities expense - electricity', '511')
+            pay_code = name_to_code.get('utilities payable - electricity', '211')
+            lines = [
+                {"account": exp_code, "debit": amount, "credit": 0},
+                {"account": pay_code, "debit": 0, "credit": amount},
+            ]
+        else:
+            # Generic: try to find account names in text
+            found_accounts = []
+            for name, code in name_to_code.items():
+                if name in text_lower:
+                    found_accounts.append((name, code))
+            
+            if len(found_accounts) >= 2:
+                # Assume first is debit, second is credit (simplified)
+                lines = [
+                    {"account": found_accounts[0][1], "debit": amount, "credit": 0},
+                    {"account": found_accounts[1][1], "debit": 0, "credit": amount},
+                ]
+            else:
+                return None
+        
+        if not lines:
+            return None
+        
+        # Balance the entry
+        from logic import balance_journal_rows
+        balanced = balance_journal_rows(lines)
+        
+        return {
+            "id": None,
+            "date": date_value,
+            "description": text,
+            "lines": balanced
+        }
 
     def _import_coa_from_effects(self, xls):
         """Import Chart of Accounts from 'Effects of Accounts' sheet, using standardized account codes."""

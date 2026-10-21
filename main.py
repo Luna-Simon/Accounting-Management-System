@@ -4,18 +4,15 @@ from tkinter import filedialog, messagebox, ttk
 from store import Book
 from ui import theme
 from ui.dashboard_tab import DashboardTab
+from ui.trial_tab import TrialTab
 from ui.chart_tab import ChartTab
 from ui.journal_tab import JournalTab
-from ui.trial_tab import TrialTab
-from ui.depreciation_tab import DepreciationTab
-from ui.worksheet_tab import WorksheetTab
-from ui.income_tab import IncomeTab
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Accounting System")
+        self.title("Accounting Management System")
         self.geometry("1300x800")
         self.minsize(1000, 650)
         theme.apply(self)
@@ -24,19 +21,16 @@ class App(tk.Tk):
         # Menu bar
         self.build_menu()
 
-        # Notebook with tabs (left sidebar style)
+        # Notebook with tabs
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.pages = [
             ("Dashboard", DashboardTab(self.tabs, self.book, self.refresh)),
+            ("Trial Balance", TrialTab(self.tabs, self.book, self.refresh)),
             ("Chart of Accounts", ChartTab(self.tabs, self.book, self.refresh)),
             ("Business Transactions", JournalTab(self.tabs, self.book, "entries", self.refresh)),
-            ("Trial Balance", TrialTab(self.tabs, self.book)),
             ("Adjustments", JournalTab(self.tabs, self.book, "adjustments", self.refresh)),
-            ("Depreciation", DepreciationTab(self.tabs, self.book, self.refresh)),
-            ("Worksheet", WorksheetTab(self.tabs, self.book)),
-            ("Income Statement", IncomeTab(self.tabs, self.book)),
         ]
 
         for title, page in self.pages:
@@ -49,7 +43,7 @@ class App(tk.Tk):
         
         file_menu = tk.Menu(menu, tearoff=False, **theme.menu_options())
         file_menu.add_command(label="Import Chart of Accounts…", command=self.import_coa, accelerator="Ctrl+I")
-        file_menu.add_command(label="Import Transactions…", command=lambda: self.import_to_tab("entries"))
+        file_menu.add_command(label="Import Business Transactions…", command=lambda: self.import_to_tab("entries"))
         file_menu.add_command(label="Import Adjustments…", command=lambda: self.import_to_tab("adjustments"))
         file_menu.add_separator()
         
@@ -227,7 +221,7 @@ Entry Form:
 
     def import_to_tab(self, kind):
         """Switch to tab and trigger import."""
-        tab_index = 2 if kind == "entries" else 4
+        tab_index = 3 if kind == "entries" else 4
         self.tabs.select(tab_index)
         page = self.pages[tab_index][1]
         if hasattr(page, 'import_from_excel'):
